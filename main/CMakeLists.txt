@@ -1,0 +1,43 @@
+idf_component_register(
+    SRCS
+            "main.c"
+            "EXIO/TCA9554PWR.c"
+            "LCD_Driver/ST7701S.c"
+            "Touch_Driver/GT911.c"
+            "Touch_Driver/esp_lcd_touch/esp_lcd_touch.c"
+            "LVGL_Driver/LVGL_Driver.c"
+            "I2C_Driver/I2C_Driver.c"
+            "SD_Card/SD_MMC.c"
+            "Buzzer/Buzzer.c"                             
+            "ui/ui.c"
+            "ui/screens/ui_Screen1.c"
+            "ui/fonts/Doto_Extra_Bold_84.c"
+            "ui/fonts/Schoolbell_24.c"
+            "ui/images/ui_img_sti_logo_png.c"
+            "ui/boot/boot_screen.c"
+
+      INCLUDE_DIRS 
+            "./EXIO"
+            "./LCD_Driver"
+            "./Touch_Driver" 
+            "./Touch_Driver/esp_lcd_touch"  
+            "./LVGL_Driver"
+            "./I2C_Driver"
+            "./Buzzer"
+            "./ui"
+            "."
+
+    REQUIRES
+            driver
+            esp_timer
+            esp_lcd
+            fatfs
+            vfs
+            freertos
+            esp_wifi
+            spi_flash
+            nvs_flash
+            bt  
+            esp_adc
+            lvgl
+)
