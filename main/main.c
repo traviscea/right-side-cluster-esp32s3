@@ -90,20 +90,6 @@ void gauge_timer(lv_timer_t * t){
 }
 
 
-
-void build_ui(){
-    lv_init();
-    ui_init();
-    init_label_styles();
-
-    lv_timer_create(gauge_timer, 100, NULL);
-    
-    while(1) {
-        lv_timer_handler();
-        vTaskDelay(pdMS_TO_TICKS(16));
-    }
-}
-
 void app_main(void){   
     I2C_Init();
     EXIO_Init();
@@ -111,5 +97,9 @@ void app_main(void){
     Touch_Init();
     LVGL_Init();
 
-    build_ui();
+    lv_init();
+    ui_init();
+    init_label_styles();
+    lv_timer_create(gauge_timer, 200, NULL);
+    lv_timer_create(arc_timer, 100, NULL);
 }
