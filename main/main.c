@@ -23,8 +23,6 @@ static lv_color_t red_color;
 static lv_color_t blue_color;
 static lv_color_t orange_color;
 
-static lv_timer_t *blink_timer = NULL;
-
 
 static inline int map_int(int x,int in_min, int in_max, int out_min, int out_max){
     return (x - in_min) * (out_max - out_min)
@@ -101,5 +99,4 @@ void app_main(void){
     ui_init();
     init_label_styles();
     lv_timer_create(gauge_timer, 200, NULL);
-    lv_timer_create(arc_timer, 100, NULL);
 }
