@@ -9,7 +9,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-    #include "lv_conf.h" 
     #include "lvgl.h"
 
 #include "ui_helpers.h"

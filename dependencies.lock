@@ -4,14 +4,15 @@ dependencies:
       type: idf
     version: 5.5.0
   lvgl/lvgl:
+    component_hash: d7c1ac037ae6e85d94897f807d6e7ba0946a83e720074fc95a4f6241da9f9f53
     dependencies: []
     source:
-      path: /Users/tway/Downloads/DemoESP32/ESP-IDF/ESP32-S3-Touch-LCD-2.8C-Test/components/lvgl__lvgl
-      type: local
-    version: 8.2.0
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 8.4.0
 direct_dependencies:
 - idf
 - lvgl/lvgl
-manifest_hash: 34dccf6d976e6f050c44256f405c0cf8ac59f59315ccb65ad774d6adf36d60ac
+manifest_hash: e3fde549607f0e079a44f10dc9f98678135676950ec8f2454e0fb59cb42c2d42
 target: esp32s3
 version: 2.0.0
