@@ -8,7 +8,6 @@
 #include "ST7701S.h"
 #include "GT911.h"
 #include "LVGL_Driver.h"
-#include "Wireless.h"
 #include "boot/boot_screen.h"
 #include "ui/screens/ui_Screen1.h"
 #include "ui/ui.h"
