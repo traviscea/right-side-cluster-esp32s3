@@ -9,7 +9,8 @@ esp_timer_handle_t lvgl_tick_timer = NULL;
 
 
 static void *buf1 = NULL;
-static void *buf2 = NULL;             
+static void *buf2 = NULL;     
+#define DRAW_BUF_LINES 60       
 
 
 
@@ -69,11 +70,9 @@ static void lvgl_tick_cb(void* arg)
 
 void lvgl_task(void *arg)
 {
-    const TickType_t delay = pdMS_TO_TICKS(16); // ~60Hz
-
     while (1) {
-        lv_timer_handler();
-        vTaskDelay(delay);
+        uint32_t delay_ms = lv_timer_handler();
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }
 
@@ -87,17 +86,33 @@ void LVGL_Init(void)
     // initialize LVGL draw buffers
     lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
 #else
-    ESP_LOGI(LVGL_TAG, "Allocate separate LVGL draw buffers from PSRAM");
-   buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * (EXAMPLE_LCD_V_RES / 2) * sizeof(lv_color_t),
-                        MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    assert(buf1);
+    buf1 = heap_caps_malloc(
+        EXAMPLE_LCD_H_RES * DRAW_BUF_LINES * sizeof(lv_color_t),
+        MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL
+    );
 
-    // Optional second buffer for double buffering
-    buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * (EXAMPLE_LCD_V_RES / 2) * sizeof(lv_color_t),
-                            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    assert(buf2);
-    // initialize LVGL draw buffers
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * (EXAMPLE_LCD_V_RES / 2));
+    buf2 = heap_caps_malloc(
+        EXAMPLE_LCD_H_RES * DRAW_BUF_LINES * sizeof(lv_color_t),
+        MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL
+    );
+
+    lv_disp_draw_buf_init(
+        &disp_buf,
+        buf1,
+        buf2,
+        EXAMPLE_LCD_H_RES * DRAW_BUF_LINES
+    );
+//     ESP_LOGI(LVGL_TAG, "Allocate separate LVGL draw buffers from PSRAM");
+//    buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * (EXAMPLE_LCD_V_RES / 2) * sizeof(lv_color_t),
+//                         MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+//     assert(buf1);
+
+//     // Optional second buffer for double buffering
+//     buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * (EXAMPLE_LCD_V_RES / 2) * sizeof(lv_color_t),
+//                             MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+//     assert(buf2);
+//     // initialize LVGL draw buffers
+//     lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * (EXAMPLE_LCD_V_RES / 2));
 #endif // CONFIG_EXAMPLE_DOUBLE_FB
 
     ESP_LOGI(LVGL_TAG, "Register display driver to LVGL");
