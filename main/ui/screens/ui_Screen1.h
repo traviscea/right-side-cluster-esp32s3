@@ -14,16 +14,14 @@ extern "C" {
 extern void ui_Screen1_screen_init(void);
 extern void ui_Screen1_screen_destroy(void);
 extern lv_obj_t *ui_Screen1;
-extern lv_obj_t *ui_Label1;
-extern lv_obj_t *ui_Label2;
-extern lv_obj_t *ui_Label3;
-extern lv_obj_t *ui_Label4;
-extern lv_obj_t *ui_Label5;
-extern lv_obj_t *ui_Label6;
-extern lv_obj_t *ui_Label7;
-extern lv_obj_t *ui_Label8;
-extern lv_obj_t *fuel_arc;
-extern lv_obj_t *ui_Image1;
+extern lv_obj_t *ui_label_boost;
+extern lv_obj_t *ui_label_afr;
+extern lv_obj_t *ui_label_afr_value;
+extern lv_obj_t *ui_label_boost_value;
+extern lv_obj_t *ui_boost_sign;
+extern lv_obj_t *ui_lap_timer_label;
+extern lv_obj_t *ui_lap_timer_value;
+extern lv_obj_t *ui_lap_timer_delta;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

@@ -38,16 +38,16 @@ void boot_screen_create(void)
     // );
 
     boot_logo = lv_img_create(boot_screen);
-    lv_img_set_src(boot_logo, &ui_img_sti_logo_png);
+    lv_img_set_src(boot_logo, &ui_black_boot_png);
     lv_obj_center(boot_logo);
     lv_obj_set_style_opa(boot_logo, LV_OPA_0, 0);
 
-    // Glow
-    lv_obj_set_style_shadow_color(
-        boot_logo, lv_color_hex(0xFF1E1E), 0
-    );
-    lv_obj_set_style_shadow_width(boot_logo, 30, 0);
-    lv_obj_set_style_shadow_opa(boot_logo, LV_OPA_60, 0);
+    // // Glow
+    // lv_obj_set_style_shadow_color(
+    //     boot_logo, lv_color_hex(0xFF1E1E), 0
+    // );
+    // lv_obj_set_style_shadow_width(boot_logo, 30, 0);
+    // lv_obj_set_style_shadow_opa(boot_logo, LV_OPA_60, 0);
 }
 
 /* ---------- Start Animation ---------- */
@@ -55,22 +55,22 @@ void boot_start(void)
 {
     lv_scr_load(boot_screen);
 
-    lv_anim_t a;
-    // lv_anim_init(&a);
-    // lv_anim_set_var(&a, boot_arc);
-    // lv_anim_set_exec_cb(&a, arc_anim_cb);
-    // lv_anim_set_values(&a, 0, 100);
-    // lv_anim_set_time(&a, 1000);
-    // lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-    // lv_anim_start(&a);
+    // lv_anim_t a;
+    // // lv_anim_init(&a);
+    // // lv_anim_set_var(&a, boot_arc);
+    // // lv_anim_set_exec_cb(&a, arc_anim_cb);
+    // // lv_anim_set_values(&a, 0, 100);
+    // // lv_anim_set_time(&a, 1000);
+    // // lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    // // lv_anim_start(&a);
 
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, boot_logo);
-    lv_anim_set_exec_cb(&a, logo_opa_cb);
-    lv_anim_set_values(&a, 0, 255);
-    lv_anim_set_time(&a, 500);
-    lv_anim_set_delay(&a, 700);
-    lv_anim_start(&a);
+    // lv_anim_init(&a);
+    // lv_anim_set_var(&a, boot_logo);
+    // lv_anim_set_exec_cb(&a, logo_opa_cb);
+    // lv_anim_set_values(&a, 0, 255);
+    // lv_anim_set_time(&a, 500);
+    // lv_anim_set_delay(&a, 700);
+    // lv_anim_start(&a);
 }
 
 /* ---------- Exit ---------- */
