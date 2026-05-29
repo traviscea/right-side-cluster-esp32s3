@@ -11,6 +11,14 @@
 // EVENTS
 lv_obj_t *ui____initial_actions0;
 
+TireWidget tire_FL;
+TireWidget tire_FR;
+TireWidget tire_RL;
+TireWidget tire_RR;
+
+screen_t currentScreen =
+    SCREEN_GAUGES;
+
 // IMAGES AND IMAGE SETS
 
 ///////////////////// TEST LVGL SETTINGS ////////////////////
@@ -23,6 +31,7 @@ lv_obj_t *ui____initial_actions0;
 void boot_starter(){
     lv_scr_load_anim(ui_Screen1, LV_SCR_LOAD_ANIM_FADE_ON, 100, 1000, false);
 }
+
 void ui_init( void ){
     lv_disp_t *dispp = lv_disp_get_default();
     lv_theme_t *theme = lv_theme_default_init(dispp, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_RED), true, LV_FONT_DEFAULT);
@@ -33,9 +42,12 @@ void ui_init( void ){
     // boot_screen_create();
     // lv_obj_add_event_cb(boot_screen, boot_starter, LV_EVENT_SCREEN_LOADED, NULL);
     // boot_start();
-    lv_disp_load_scr( ui_Screen1);
+    currentScreen = SCREEN_GAUGES;
+
+    lv_disp_load_scr(ui_Screen1);
 }
 
 void ui_destroy( void ){
     ui_Screen1_screen_destroy();
+    ui_Screen2_screen_destroy();
 }

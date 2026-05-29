@@ -15,7 +15,19 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include "driver/gpio.h"
 
+#include "esp_wifi.h"
+#include "esp_now.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "nvs_flash.h"
+
+#include "soc/rtc.h"
+#include "esp_timer.h"
+
+
+static bool screen2_initialized = false;
 
 #define UART_PORT      UART_NUM_1
 #define UART_RX_PIN    44
@@ -30,6 +42,9 @@
 #define PSI_START_AFR_CHECK  5.0
 #define AFR_RICH_WARN        10.5
 #define AFR_LEAN_WARN        11.9
+
+#define BTN_NEXT_SCREEN  7
+
 static const char *TAG = "RX";
 
 static lv_color_t green_color;
@@ -51,9 +66,44 @@ typedef struct __attribute__((packed)) {
     int32_t  lap_delta_ms; 
 } gauge_payload_t;
 
+typedef struct __attribute__((packed)) {
+    uint8_t tireID;
+    uint8_t battery;
+    int16_t zone[5];
+    int16_t hottest;
+} TirePacket;
+
+
 static volatile float g_afr = 14.7f;
 static volatile float g_boost = -0.0f;
 static volatile uint32_t g_lap_timer = 0;
+
+static TirePacket tirePackets[4];
+static bool espNowRunning = false;
+static bool espNowSetup = false;
+
+static lv_timer_t *gaugeTimer = NULL;
+
+static uint32_t tireLastSeen[4] = {
+    -5000,
+    -5000,
+    -5000,
+    -5000
+};
+
+static uint32_t disconnectStart[4] = {
+    0,0,0,0
+};
+
+static lv_color_t tireZoneColors[4][5];
+
+static float uiTemps[4][5] = {
+    0
+};
+
+static bool tireConnectedState[4];
+
+static lv_color_t lastZoneColors[4][5];
 
 
 static void format_lap_time(uint64_t ms, char *buf){
@@ -110,6 +160,8 @@ static void uart_init(void){
 }
 
 static void uart_rx_task(void *arg){
+
+    
     uint8_t buf[PKT_LEN];
     int idx = 0;
 
@@ -155,6 +207,8 @@ static void uart_rx_task(void *arg){
             );
             #endif
         }
+
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -252,21 +306,702 @@ void update_gauge_values(){
 
 }
 
-void gauge_timer(lv_timer_t * t){
-    update_gauge_values();
+lv_color_t temp_to_color(float temp)
+{
+    // =====================================
+    // TEMP RANGE
+    // =====================================
+
+    if(temp < 70)
+        temp = 70;
+
+    if(temp > 220)
+        temp = 220;
+
+    // =====================================
+    // NORMALIZE 0.0 -> 1.0
+    // =====================================
+
+    float t =
+        (temp - 70.0f)
+        /
+        (220.0f - 70.0f);
+
+    // =====================================
+    // HSV RAINBOW
+    // =====================================
+
+    // Hue:
+    // 240 = blue
+    // 180 = cyan
+    // 120 = green
+    // 60  = yellow
+    // 30  = orange
+    // 0   = red
+
+    float hue =
+        240.0f
+        *
+        (1.0f - t);
+
+    float saturation = 1.0f;
+    float value = 1.0f;
+
+    // =====================================
+    // HSV -> RGB
+    // =====================================
+
+    float c =
+        value * saturation;
+
+    float x =
+        c *
+        (
+            1.0f
+            -
+            fabsf(
+                fmodf(
+                    hue / 60.0f,
+                    2
+                )
+                -
+                1.0f
+            )
+        );
+
+    float m =
+        value - c;
+
+    float r=0;
+    float g=0;
+    float b=0;
+
+    if(hue < 60)
+    {
+        r=c; g=x; b=0;
+    }
+    else if(hue < 120)
+    {
+        r=x; g=c; b=0;
+    }
+    else if(hue < 180)
+    {
+        r=0; g=c; b=x;
+    }
+    else
+    {
+        r=0; g=x; b=c;
+    }
+
+    uint8_t R =
+        (r + m) * 255;
+
+    uint8_t G =
+        (g + m) * 255;
+
+    uint8_t B =
+        (b + m) * 255;
+
+    return lv_color_make(
+        R,
+        G,
+        B
+    );
+}
+
+void update_tire_widget(
+    TireWidget *tire,
+    int tireIndex,
+    float t1,
+    float t2,
+    float t3,
+    float t4,
+    float t5
+) {
+    lv_obj_t* zones[5] = {
+        tire->zone1,
+        tire->zone2,
+        tire->zone3,
+        tire->zone4,
+        tire->zone5
+    };
+
+    float temps[5] = {
+        t1,
+        t2,
+        t3,
+        t4,
+        t5
+    };
+
+    for(int i = 0; i < 5; i++) {
+        lv_color_t newColor =
+            temp_to_color(
+                temps[i]
+            );
+
+        if(lastZoneColors[tireIndex][i].full != newColor.full) {
+            lv_obj_set_style_bg_color(
+                zones[i],
+                newColor,
+                0
+            );
+
+            lv_obj_set_style_bg_grad_dir(
+                zones[i],
+                LV_GRAD_DIR_NONE,
+                0
+            );
+
+            lastZoneColors[tireIndex][i] =
+                newColor;
+        }
+    }
+}
+
+void on_tire_data(const esp_now_recv_info_t *info, const uint8_t *data, int len){
+    if(!espNowRunning)
+        return;
+    
+    if(len != sizeof(TirePacket))
+        return;
+
+    TirePacket pkt;
+
+    memcpy(&pkt, data, sizeof(TirePacket));
+
+    if(pkt.tireID > 3)
+        return;
+
+    tireLastSeen[pkt.tireID] = lv_tick_get();
+
+    memcpy(&tirePackets[pkt.tireID], &pkt, sizeof(TirePacket));
 }
 
 
-void app_main(void){   
+void updateBatteryWidget(
+    TireWidget *tire,
+    int percent
+)
+{
+    static int lastWidth[4] =
+    {
+        -1,-1,-1,-1
+    };
+
+    static uint32_t lastColor[4] =
+    {
+        0,0,0,0
+    };
+
+    int tireIndex = 0;
+
+    if(tire == &tire_FL) tireIndex = 0;
+    if(tire == &tire_FR) tireIndex = 1;
+    if(tire == &tire_RL) tireIndex = 2;
+    if(tire == &tire_RR) tireIndex = 3;
+
+    if(percent < 0)
+        percent = 0;
+
+    if(percent > 100)
+        percent = 100;
+
+    int width =
+        (28 * percent) / 100;
+
+    if(percent > 0 && width < 3)
+    {
+        width = 3;
+    }
+
+    lv_color_t color;
+
+    if(percent > 50)
+    {
+        color =
+            lv_palette_main(
+                LV_PALETTE_GREEN
+            );
+    }
+    else if(percent > 20)
+    {
+        color =
+            lv_palette_main(
+                LV_PALETTE_YELLOW
+            );
+    }
+    else
+    {
+        color =
+            lv_palette_main(
+                LV_PALETTE_RED
+            );
+    }
+
+    // ==============================
+    // ONLY UPDATE IF CHANGED
+    // ==============================
+
+    if(width != lastWidth[tireIndex])
+    {
+        lv_obj_set_size(
+            tire->batteryFill,
+            width,
+            10
+        );
+
+        lastWidth[tireIndex] =
+            width;
+    }
+
+    if(color.full != lastColor[tireIndex])
+    {
+        lv_obj_set_style_bg_color(
+            tire->batteryFill,
+            color,
+            0
+        );
+
+        lastColor[tireIndex] =
+            color.full;
+    }
+}
+
+void update_tire_screen(void)
+{
+    uint32_t now =
+        lv_tick_get();
+
+    static int64_t lastBatteryUpdate = 0;
+
+    // =====================================
+    // SMOOTHED UI TEMPS
+    // =====================================
+
+    static float uiTemps[4][5] = {
+        {0}
+    };
+
+    // =====================================
+    // TARGET TEMPS
+    // =====================================
+    for(int tire=0; tire<4; tire++) {
+
+        bool connected =
+            (
+                now - tireLastSeen[tire]
+            ) < 2000;
+
+        if(!connected)
+            continue;
+
+        for(int zone=0; zone<5; zone++) {
+
+            float target =
+                tirePackets[tire]
+                .zone[zone]
+                /
+                10.0f;
+
+            // initialize
+            if(uiTemps[tire][zone] <= 0.1f)
+            {
+                uiTemps[tire][zone] =
+                    target;
+            }
+
+            // EMA
+            uiTemps[tire][zone] =
+                (
+                    target * 0.03f
+                )
+                +
+                (
+                    uiTemps[tire][zone]
+                    * 0.97f
+                );
+        }
+    }
+
+    // =====================================
+    // CONNECTION STATUS
+    // =====================================
+
+    TireWidget* tires[4] = {
+        &tire_FL,
+        &tire_FR,
+        &tire_RL,
+        &tire_RR
+    };
+
+    for(int i=0; i<4; i++) {
+       bool connected = true;
+
+        if((now - tireLastSeen[i]) > 2000) {
+            // first timeout detected
+            if(disconnectStart[i] == 0) {
+                disconnectStart[i] = now;
+            }
+
+            // only disconnect if timeout persists
+            if((now - disconnectStart[i]) > 1500) {
+                connected = false;
+            }
+        }
+        else {
+            disconnectStart[i] = 0;
+        }
+
+
+        
+        bool wasConnected = tireConnectedState[i];
+
+        if(wasConnected != connected) {
+            tireConnectedState[i] =
+                connected;
+
+            lv_obj_set_style_bg_color(
+                tires[i]->statusDot,
+                connected
+                ?
+                lv_palette_main(
+                    LV_PALETTE_GREEN
+                )
+                :
+                lv_palette_main(
+                    LV_PALETTE_RED
+                ),
+                0
+            );
+        }
+
+        if(!connected) {
+            memset(
+                &tirePackets[i],
+                0,
+                sizeof(TirePacket)
+            );
+
+            // =================================
+            // FADE TEMPS TO AMBIENT
+            // =================================
+
+            lv_obj_t* zones[5] = {
+                tires[i]->zone1,
+                tires[i]->zone2,
+                tires[i]->zone3,
+                tires[i]->zone4,
+                tires[i]->zone5
+            };
+
+            for(int z=0; z<5; z++) {
+                lv_obj_set_style_bg_color(
+                    zones[z],
+                    lv_color_black(),
+                    0
+                );
+
+                lastZoneColors[i][z] =
+                    lv_color_black();
+
+                uiTemps[i][z] = 0;
+            }
+
+            // =================================
+            // EMPTY BATTERY
+            // =================================
+
+            updateBatteryWidget(
+                tires[i],
+                0
+            );
+            
+            for(int z=0; z<5; z++){
+                lastZoneColors[i][z] =
+                    lv_color_black();
+            }
+        } else {
+            // =====================================
+            // UPDATE TIRE WIDGETS
+            // =====================================
+            if(!wasConnected && connected) {
+                for(int z=0; z<5; z++) {
+                    uiTemps[i][z] =
+                        tirePackets[i]
+                        .zone[z]
+                        /
+                        10.0f;
+
+                    lastZoneColors[i][z] =
+                        lv_color_black();
+                }
+            }
+            update_tire_widget(
+                tires[i],
+                i,
+                uiTemps[i][0],
+                uiTemps[i][1],
+                uiTemps[i][2],
+                uiTemps[i][3],
+                uiTemps[i][4]
+            );
+        }
+    }
+
+    // =====================================
+    // BATTERY UPDATE
+    // =====================================
+
+    if(
+        esp_timer_get_time()
+        -
+        lastBatteryUpdate
+        >
+        1000000
+    )
+    {
+        updateBatteryWidget(
+            &tire_FL,
+            tirePackets[0].battery
+        );
+
+        updateBatteryWidget(
+            &tire_FR,
+            tirePackets[1].battery
+        );
+
+        updateBatteryWidget(
+            &tire_RL,
+            tirePackets[2].battery
+        );
+
+        updateBatteryWidget(
+            &tire_RR,
+            tirePackets[3].battery
+        );
+
+        lastBatteryUpdate =
+            esp_timer_get_time();
+    }
+}
+
+
+void esp_now_setup() {
+    // =====================================
+    // WIFI INIT ONCE
+    // =====================================
+
+    ESP_ERROR_CHECK(
+        nvs_flash_init()
+    );
+
+    ESP_ERROR_CHECK(
+        esp_netif_init()
+    );
+
+    ESP_ERROR_CHECK(
+        esp_event_loop_create_default()
+    );
+
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg =
+        WIFI_INIT_CONFIG_DEFAULT();
+
+    ESP_ERROR_CHECK(
+        esp_wifi_init(&cfg)
+    );
+
+    ESP_ERROR_CHECK(
+        esp_wifi_set_mode(
+            WIFI_MODE_STA
+        )
+    );
+
+    ESP_ERROR_CHECK(
+        esp_wifi_start()
+    );
+
+    ESP_ERROR_CHECK(
+        esp_wifi_set_max_tx_power(60)
+    );
+
+    ESP_ERROR_CHECK(
+        esp_wifi_set_ps(WIFI_PS_MIN_MODEM)
+    );
+
+    uint8_t mac[6];
+
+    esp_wifi_get_mac(
+        WIFI_IF_STA,
+        mac
+    );
+
+    ESP_LOGI(
+        TAG,
+        "MAC: %02X:%02X:%02X:%02X:%02X:%02X",
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5]
+    );
+
+    // =====================================
+    // ESPNOW INIT ONCE
+    // =====================================
+
+    ESP_ERROR_CHECK(
+        esp_now_init()
+    );
+
+    esp_now_register_recv_cb(
+        on_tire_data
+    );
+
+    ESP_LOGI(
+        TAG,
+        "ESP-NOW READY"
+    );
+}
+
+void start_espnow(void) {
+    if(!espNowSetup) {
+        esp_now_setup();
+        espNowSetup = true;
+    }
+
+    espNowRunning = true;
+
+    uint32_t now = lv_tick_get();
+    for(int i=0;i<4;i++) {
+        tireLastSeen[i] = now - 5000;
+        disconnectStart[i] = now - 5000;
+        tireConnectedState[i] = false;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "ESP-NOW ENABLED"
+    );
+}
+
+void stop_espnow(void) {
+    espNowRunning = false;
+
+    ESP_LOGI(
+        TAG,
+        "ESP-NOW DISABLED"
+    );
+}
+
+void next_screen(void) {
+    if(currentScreen == SCREEN_GAUGES) {
+        if(!screen2_initialized) {
+            ui_Screen2_screen_init();
+            screen2_initialized = true;
+        }
+
+        start_espnow();
+
+        currentScreen = SCREEN_TIRES;
+
+        lv_scr_load(ui_Screen2);
+
+        // Slower tire screen refresh
+        lv_timer_set_period(
+            gaugeTimer,
+            150
+        );
+    }
+    else {
+        stop_espnow();
+
+        currentScreen = SCREEN_GAUGES;
+
+        lv_scr_load(ui_Screen1);
+
+        // Faster gauge screen refresh
+        lv_timer_set_period(
+            gaugeTimer,
+            50
+        );
+    }
+}
+
+void handle_buttons(void){
+
+    static bool lastState = true;
+
+    static uint32_t lastPress = 0;
+
+    bool pressed =
+        gpio_get_level(BTN_NEXT_SCREEN);
+
+    uint32_t now =
+        xTaskGetTickCount();
+
+    // Falling edge detect
+    if(
+        lastState == true &&
+        pressed == false
+    ){
+
+        // debounce
+        if(
+            now - lastPress >
+            pdMS_TO_TICKS(15)
+        ){
+
+            next_screen();
+
+            lastPress = now;
+        }
+    }
+
+    lastState = pressed;
+}
+
+
+void gauge_timer(lv_timer_t * t){ 
+    switch(currentScreen){
+        case SCREEN_GAUGES:
+            update_gauge_values();
+            break;
+
+        case SCREEN_TIRES:
+            update_tire_screen();
+            break;
+    }
+}
+
+void button_timer(lv_timer_t * t){
+    handle_buttons();
+}
+
+void app_main(void){
     I2C_Init();
     EXIO_Init();
     LCD_Init();
     Touch_Init();
     LVGL_Init();
 
+    rtc_cpu_freq_config_t config;
+    rtc_clk_cpu_freq_mhz_to_config(80, &config);
+    rtc_clk_cpu_freq_set_config(&config);
+
+
     init_label_styles();
 
     ui_init();
+
+    memset(
+        tireZoneColors,
+        0xFF,
+        sizeof(tireZoneColors)
+    );
 
     uart_init();
 
@@ -275,14 +1010,20 @@ void app_main(void){
         "uart_rx",
         4096,
         NULL,
-        10,
+        5,
         NULL
     );
 
-    lv_timer_create(gauge_timer, 50, NULL);
-
+    gaugeTimer =
+        lv_timer_create(
+            gauge_timer,
+            50,
+            NULL
+        );
+    lv_timer_create(button_timer, 10, NULL);
     
-    Set_Backlight(0); 
+    Set_Backlight(0);
     vTaskDelay(pdMS_TO_TICKS(750)); 
-    Set_Backlight(100);
+    Set_Backlight(50);
+
 }
