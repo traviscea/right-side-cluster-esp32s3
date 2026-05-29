@@ -1,5 +1,5 @@
 {
-    "idf.port": "/dev/tty.usbmodem21101",
+    "idf.port": "/dev/tty.usbmodem21201",
     "idf.flashType": "UART",
     "idf.currentSetup": "/Users/tway/esp/esp-idf"
 }
