@@ -1,4 +1,5 @@
 #include "LVGL_Driver.h"
+#include <assert.h>
 
 static const char *LVGL_TAG = "LVGL";   
 lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
@@ -7,6 +8,19 @@ lv_disp_drv_t disp_drv;      // contains callback functions
 lv_indev_drv_t indev_drv;
 esp_timer_handle_t lvgl_tick_timer = NULL;
 
+
+static SemaphoreHandle_t lvgl_mux = NULL;   // guards every LVGL call
+
+bool LVGL_Lock(int timeout_ms)
+{
+    const TickType_t ticks = (timeout_ms < 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    return xSemaphoreTakeRecursive(lvgl_mux, ticks) == pdTRUE;
+}
+
+void LVGL_Unlock(void)
+{
+    xSemaphoreGiveRecursive(lvgl_mux);
+}
 
 static void *buf1 = NULL;
 static void *buf2 = NULL;     
@@ -71,7 +85,13 @@ static void lvgl_tick_cb(void* arg)
 void lvgl_task(void *arg)
 {
     while (1) {
-        uint32_t delay_ms = lv_timer_handler();
+        uint32_t delay_ms = 10;
+        if (LVGL_Lock(-1)) {
+            delay_ms = lv_timer_handler();
+            LVGL_Unlock();
+        }
+        if (delay_ms > 500) delay_ms = 500;
+        if (delay_ms < 1) delay_ms = 1;
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }
@@ -151,6 +171,8 @@ void LVGL_Init(void)
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, 1000)); 
 
+    lvgl_mux = xSemaphoreCreateRecursiveMutex();
+    assert(lvgl_mux);
     xTaskCreatePinnedToCore(lvgl_task, "lvgl_task", 8192, NULL, 5, NULL, 1);
 
 }

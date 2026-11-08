@@ -26,18 +26,8 @@
 
 #define ENABLE_LOGS    false
 
-#define HIGH_BOOST_WARNING   22.5
-#define PSI_START_AFR_CHECK  5.0
-#define AFR_RICH_WARN        10.5
-#define AFR_LEAN_WARN        11.9
+// Boost / AFR warning thresholds and colors now live in ui/screens/ui_Screen1.h
 static const char *TAG = "RX";
-
-static lv_color_t green_color;
-static lv_color_t red_color;
-static lv_color_t blue_color;
-static lv_color_t orange_color;
-static lv_color_t purple_color;
-static lv_color_t pink_color;
 
 typedef struct __attribute__((packed)) {
     uint16_t oil_temp;      
@@ -48,26 +38,14 @@ typedef struct __attribute__((packed)) {
     uint16_t afr;         
     int16_t boost;          
     uint32_t lap_time_ms;    
-    int32_t  lap_delta_ms; 
+    uint32_t best_lap_ms;    // session best lap (0 = none yet)
 } gauge_payload_t;
 
 static volatile float g_afr = 14.7f;
 static volatile float g_boost = -0.0f;
 static volatile uint32_t g_lap_timer = 0;
+static volatile uint32_t g_best_lap = 0;
 
-
-static void format_lap_time(uint64_t ms, char *buf){
-    if (ms > 0) {
-        uint32_t min = ms / 60000;
-        uint32_t sec = (ms % 60000) / 1000;
-        uint32_t hundredths = (ms % 1000) / 10;;
-
-        snprintf(buf, 16, "%02lu:%02lu.%02lu", min, sec, hundredths);
-    } else {
-        snprintf(buf, 16, "--:--:--");
-    }
-
-}
 
 static uint16_t crc16_ccitt(const uint8_t *data, uint16_t len){
     uint16_t crc = 0xFFFF;
@@ -146,6 +124,7 @@ static void uart_rx_task(void *arg){
             g_afr = afr;
             g_boost = boost;
             g_lap_timer = p.lap_time_ms;
+            g_best_lap = p.best_lap_ms;
             
             #if ENABLE_LOGS
             ESP_LOGI(TAG,
@@ -159,101 +138,13 @@ static void uart_rx_task(void *arg){
 }
 
 
-static inline int map_int(int x,int in_min, int in_max, int out_min, int out_max){
-    return (x - in_min) * (out_max - out_min)
-           / (in_max - in_min)
-           + out_min;
-}
-
-static inline float constrain_float(float x, float low, float high) {
-    if (x < low) return low;
-    if (x > high) return high;
-    return x;
-}
-
-static void init_label_styles(void){
-
-    blue_color = lv_palette_main(LV_PALETTE_CYAN);
-    green_color = lv_color_hex(0x28FF00);
-    red_color = lv_palette_main(LV_PALETTE_PINK);
-    orange_color = lv_palette_main(LV_PALETTE_DEEP_ORANGE);
-    purple_color = lv_palette_main(LV_PALETTE_PURPLE);
-    pink_color = lv_palette_main(LV_PALETTE_PINK);
-}
-
-static void update_afr_label(float new_value, lv_color_t new_color){
-    char buf[12];
-    snprintf(buf, sizeof(buf), "%4.1f", new_value);
-
-    // Only update text if changed
-    const char *old_text = lv_label_get_text(ui_label_afr_value);
-    if (strcmp(old_text, buf) != 0) {
-        lv_label_set_text(ui_label_afr_value, buf);
-    }
-
-    // Only update color if changed
-    lv_color_t old_color = lv_obj_get_style_text_color(ui_label_afr_value, LV_PART_MAIN | LV_STATE_DEFAULT);
-    if (old_color.full != new_color.full) {
-        lv_obj_set_style_text_color(ui_label_afr_value, new_color, LV_PART_MAIN | LV_STATE_DEFAULT);
-    }
-
-}
-
-static void update_boost_label(float boost_val, lv_color_t color){
-    char buf[16];
-
-    // Always show magnitude only
-    float abs_boost = fabsf(boost_val);
-    snprintf(buf, sizeof(buf), "%4.1f", abs_boost);
-
-    const char *old_text = lv_label_get_text(ui_label_boost_value);
-    if (strcmp(old_text, buf) != 0) {
-        lv_label_set_text(ui_label_boost_value, buf);
-    }
-
-    // Update color if needed
-    lv_color_t old_color = lv_obj_get_style_text_color(ui_label_boost_value, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-    if (old_color.full != color.full) {
-        lv_obj_set_style_text_color(ui_label_boost_value, color,
-                                    LV_PART_MAIN | LV_STATE_DEFAULT);
-    }
-
-    // Toggle negative sign visibility
-    if (boost_val < 0.0f) {
-        lv_obj_set_style_text_opa(ui_boost_sign, LV_OPA_COVER, 0);
-    } else {
-        lv_obj_set_style_text_opa(ui_boost_sign, LV_OPA_TRANSP, 0);
-    }
-}
-
-static void update_lap_timer(){
-    char lap_buf[16];
-    format_lap_time(g_lap_timer, lap_buf);
-
-    const char *old_text = lv_label_get_text(ui_lap_timer_value);
-    if (strcmp(old_text, lap_buf) != 0) {
-        lv_label_set_text(ui_lap_timer_value, lap_buf);
-    }
-}
-
-void update_gauge_values(){
-    lv_color_t boost_color = green_color;
-    lv_color_t afr_color = green_color;
-    if (g_boost >= PSI_START_AFR_CHECK && (g_afr < AFR_RICH_WARN  || g_afr > AFR_LEAN_WARN)){
-        afr_color = red_color;
-    }
-    if(g_boost >= HIGH_BOOST_WARNING){
-        boost_color = red_color;
-    }
-    update_afr_label(g_afr, afr_color);
-    update_boost_label(g_boost, boost_color);
-    update_lap_timer();
-
-}
-
+// Push the latest UART values into the gauge. Colors and warnings are
+// handled by the screen (see ui/screens/ui_Screen1.h).
 void gauge_timer(lv_timer_t * t){
-    update_gauge_values();
+    ui_right_set_boost(g_boost);
+    ui_right_set_afr(g_afr);
+    ui_right_set_lap_ms(g_lap_timer);
+    ui_right_set_best_lap_ms(g_best_lap);
 }
 
 
@@ -264,9 +155,12 @@ void app_main(void){
     Touch_Init();
     LVGL_Init();
 
-    init_label_styles();
-
+    // LVGL isn't thread-safe: hold the lock while building the UI so the
+    // LVGL task can't render at the same time (that crashes at boot).
+    LVGL_Lock(-1);
     ui_init();
+    lv_timer_create(gauge_timer, 50, NULL);
+    LVGL_Unlock();
 
     uart_init();
 
@@ -279,9 +173,7 @@ void app_main(void){
         NULL
     );
 
-    lv_timer_create(gauge_timer, 50, NULL);
 
-    
     Set_Backlight(0); 
     vTaskDelay(pdMS_TO_TICKS(750)); 
     Set_Backlight(100);

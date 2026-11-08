@@ -3,6 +3,9 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "lvgl.h"
+#include <stdbool.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "demos/lv_demos.h"
 
 #include "ST7701S.h"
@@ -19,3 +22,8 @@ void example_increase_lvgl_tick(void *arg);
 void example_touchpad_read( lv_indev_drv_t * drv, lv_indev_data_t * data );
 
 void LVGL_Init(void);
+
+// Take/give the LVGL lock from any task other than the LVGL task itself.
+// timeout_ms < 0 waits forever. Returns true when the lock was taken.
+bool LVGL_Lock(int timeout_ms);
+void LVGL_Unlock(void);
