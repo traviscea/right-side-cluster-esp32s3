@@ -1,4 +1,5 @@
 #include "ST7701S.h"
+#include "esp_attr.h"
 
 #define SPI_WriteComm(cmd) ST7701S_WriteCommand(St7701S_handle, cmd)
 #define SPI_WriteData(data) ST7701S_WriteData(St7701S_handle, data)
@@ -405,7 +406,8 @@ SemaphoreHandle_t sem_gui_ready;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static bool example_on_vsync_event(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_data)
+// IRAM_ATTR: runs from internal RAM in the LCD interrupt (CONFIG_LCD_RGB_ISR_IRAM_SAFE).
+static bool IRAM_ATTR example_on_vsync_event(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_data)
 {
     BaseType_t high_task_awoken = pdFALSE;
 #if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
@@ -441,7 +443,8 @@ void LCD_Init(void)
         .psram_trans_align = 64,
         .num_fbs = EXAMPLE_LCD_NUM_FB,
 #if CONFIG_EXAMPLE_USE_BOUNCE_BUFFER
-        .bounce_buffer_size_px = 10 * EXAMPLE_LCD_H_RES,
+        // 20 lines per refill: half as many LCD interrupts as 10 lines
+        .bounce_buffer_size_px = 20 * EXAMPLE_LCD_H_RES,
 #endif
         .clk_src = LCD_CLK_SRC_DEFAULT,
         .disp_gpio_num = EXAMPLE_PIN_NUM_DISP_EN,

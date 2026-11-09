@@ -12,6 +12,10 @@
 #include "ui/ui.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_system.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
@@ -22,22 +26,12 @@
 #define UART_BAUD      2000000
 
 #define SOF_BYTE       0xA5
-#define PKT_LEN        26
+#define PKT_LEN        27   // SOF + seq + 23-byte payload + CRC16
 
 #define ENABLE_LOGS    false
 
-#define HIGH_BOOST_WARNING   22.5
-#define PSI_START_AFR_CHECK  5.0
-#define AFR_RICH_WARN        10.5
-#define AFR_LEAN_WARN        11.9
+// Boost / AFR warning thresholds and colors now live in ui/screens/ui_Screen1.h
 static const char *TAG = "RX";
-
-static lv_color_t green_color;
-static lv_color_t red_color;
-static lv_color_t blue_color;
-static lv_color_t orange_color;
-static lv_color_t purple_color;
-static lv_color_t pink_color;
 
 typedef struct __attribute__((packed)) {
     uint16_t oil_temp;      
@@ -48,26 +42,16 @@ typedef struct __attribute__((packed)) {
     uint16_t afr;         
     int16_t boost;          
     uint32_t lap_time_ms;    
-    int32_t  lap_delta_ms; 
+    uint32_t best_lap_ms;    // session best lap (0 = none yet)
+    uint8_t  theme;          // face color theme from the center cluster
 } gauge_payload_t;
 
+static volatile uint8_t g_theme = 0;        // face color theme, from the center cluster
 static volatile float g_afr = 14.7f;
 static volatile float g_boost = -0.0f;
 static volatile uint32_t g_lap_timer = 0;
+static volatile uint32_t g_best_lap = 0;
 
-
-static void format_lap_time(uint64_t ms, char *buf){
-    if (ms > 0) {
-        uint32_t min = ms / 60000;
-        uint32_t sec = (ms % 60000) / 1000;
-        uint32_t hundredths = (ms % 1000) / 10;;
-
-        snprintf(buf, 16, "%02lu:%02lu.%02lu", min, sec, hundredths);
-    } else {
-        snprintf(buf, 16, "--:--:--");
-    }
-
-}
 
 static uint16_t crc16_ccitt(const uint8_t *data, uint16_t len){
     uint16_t crc = 0xFFFF;
@@ -139,6 +123,8 @@ static void uart_rx_task(void *arg){
             gauge_payload_t p;
             memcpy(&p, &buf[2], sizeof(p));
 
+            g_theme = p.theme;
+
             float afr = p.afr * 0.1f;
             float boost = p.boost * 0.1f;
 
@@ -146,6 +132,7 @@ static void uart_rx_task(void *arg){
             g_afr = afr;
             g_boost = boost;
             g_lap_timer = p.lap_time_ms;
+            g_best_lap = p.best_lap_ms;
             
             #if ENABLE_LOGS
             ESP_LOGI(TAG,
@@ -159,114 +146,135 @@ static void uart_rx_task(void *arg){
 }
 
 
-static inline int map_int(int x,int in_min, int in_max, int out_min, int out_max){
-    return (x - in_min) * (out_max - out_min)
-           / (in_max - in_min)
-           + out_min;
+// Push the latest UART values into the gauge. Colors and warnings are
+// handled by the screen (see ui/screens/ui_Screen1.h).
+//---------------------------- FACE COLOR THEME ----------------------------//
+// The center cluster sends the theme number in every packet (it owns the
+// button). It's remembered here too, so the gauge starts up in the right color
+// before the first packet arrives.
+
+static uint8_t load_theme(void)
+{
+    uint8_t t = 0;
+    nvs_handle_t h;
+    if (nvs_open("ui", NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, "theme", &t);
+        nvs_close(h);
+    }
+    return t < UI_THEME_COUNT ? t : 0;
 }
 
-static inline float constrain_float(float x, float low, float high) {
-    if (x < low) return low;
-    if (x > high) return high;
-    return x;
-}
-
-static void init_label_styles(void){
-
-    blue_color = lv_palette_main(LV_PALETTE_CYAN);
-    green_color = lv_color_hex(0x28FF00);
-    red_color = lv_palette_main(LV_PALETTE_PINK);
-    orange_color = lv_palette_main(LV_PALETTE_DEEP_ORANGE);
-    purple_color = lv_palette_main(LV_PALETTE_PURPLE);
-    pink_color = lv_palette_main(LV_PALETTE_PINK);
-}
-
-static void update_afr_label(float new_value, lv_color_t new_color){
-    char buf[12];
-    snprintf(buf, sizeof(buf), "%4.1f", new_value);
-
-    // Only update text if changed
-    const char *old_text = lv_label_get_text(ui_label_afr_value);
-    if (strcmp(old_text, buf) != 0) {
-        lv_label_set_text(ui_label_afr_value, buf);
-    }
-
-    // Only update color if changed
-    lv_color_t old_color = lv_obj_get_style_text_color(ui_label_afr_value, LV_PART_MAIN | LV_STATE_DEFAULT);
-    if (old_color.full != new_color.full) {
-        lv_obj_set_style_text_color(ui_label_afr_value, new_color, LV_PART_MAIN | LV_STATE_DEFAULT);
-    }
-
-}
-
-static void update_boost_label(float boost_val, lv_color_t color){
-    char buf[16];
-
-    // Always show magnitude only
-    float abs_boost = fabsf(boost_val);
-    snprintf(buf, sizeof(buf), "%4.1f", abs_boost);
-
-    const char *old_text = lv_label_get_text(ui_label_boost_value);
-    if (strcmp(old_text, buf) != 0) {
-        lv_label_set_text(ui_label_boost_value, buf);
-    }
-
-    // Update color if needed
-    lv_color_t old_color = lv_obj_get_style_text_color(ui_label_boost_value, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-    if (old_color.full != color.full) {
-        lv_obj_set_style_text_color(ui_label_boost_value, color,
-                                    LV_PART_MAIN | LV_STATE_DEFAULT);
-    }
-
-    // Toggle negative sign visibility
-    if (boost_val < 0.0f) {
-        lv_obj_set_style_text_opa(ui_boost_sign, LV_OPA_COVER, 0);
-    } else {
-        lv_obj_set_style_text_opa(ui_boost_sign, LV_OPA_TRANSP, 0);
+static void save_theme(uint8_t t)
+{
+    nvs_handle_t h;
+    if (nvs_open("ui", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "theme", t);
+        nvs_commit(h);
+        nvs_close(h);
     }
 }
 
-static void update_lap_timer(){
-    char lap_buf[16];
-    format_lap_time(g_lap_timer, lap_buf);
+// Called from gauge_timer (LVGL thread). Applies a new theme right away and
+// saves it once it has stayed the same for 3 s.
+static void theme_update(void)
+{
+    static uint8_t saved = 0xFF;
+    static int64_t changed_ms = 0;
+    uint8_t t = g_theme;
+    if (t >= UI_THEME_COUNT) return;
+    if (saved == 0xFF) saved = ui_get_theme();      // first call: what we booted with
 
-    const char *old_text = lv_label_get_text(ui_lap_timer_value);
-    if (strcmp(old_text, lap_buf) != 0) {
-        lv_label_set_text(ui_lap_timer_value, lap_buf);
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (t != ui_get_theme()) {
+        ui_set_theme(t);
+        changed_ms = now_ms;
+    }
+    if (t != saved && now_ms - changed_ms > 3000) {
+        save_theme(t);
+        saved = t;
     }
 }
-
-void update_gauge_values(){
-    lv_color_t boost_color = green_color;
-    lv_color_t afr_color = green_color;
-    if (g_boost >= PSI_START_AFR_CHECK && (g_afr < AFR_RICH_WARN  || g_afr > AFR_LEAN_WARN)){
-        afr_color = red_color;
-    }
-    if(g_boost >= HIGH_BOOST_WARNING){
-        boost_color = red_color;
-    }
-    update_afr_label(g_afr, afr_color);
-    update_boost_label(g_boost, boost_color);
-    update_lap_timer();
-
-}
+//--------------------------------------------------------------------------//
 
 void gauge_timer(lv_timer_t * t){
-    update_gauge_values();
+    theme_update();
+    ui_right_set_boost(g_boost);
+    ui_right_set_afr(g_afr);
+    ui_right_set_lap_ms(g_lap_timer);
+    ui_right_set_best_lap_ms(g_best_lap);
 }
 
 
+// Short, screen-friendly name for a reset reason
+static const char *reset_reason_name(esp_reset_reason_t r)
+{
+    switch (r) {
+        case ESP_RST_POWERON:   return "POWER ON";
+        case ESP_RST_EXT:       return "EXT RESET";
+        case ESP_RST_SW:        return "SW RESET";
+        case ESP_RST_PANIC:     return "CRASH";
+        case ESP_RST_INT_WDT:   return "INT WDT";
+        case ESP_RST_TASK_WDT:  return "TASK WDT";
+        case ESP_RST_WDT:       return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEP SLEEP";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "UNKNOWN";
+    }
+}
+
+// Keeps a running count of unexpected restarts (anything but a normal power
+// on) in NVS. Returns the count including this boot.
+static uint32_t count_unexpected_restart(esp_reset_reason_t r)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        err = nvs_flash_init();
+    }
+    if (err != ESP_OK) return 0;
+
+    uint32_t count = 0;
+    nvs_handle_t h;
+    if (nvs_open("diag", NVS_READWRITE, &h) != ESP_OK) return 0;
+    nvs_get_u32(h, "unexp_rst", &count);          // stays 0 if not stored yet
+    if (r != ESP_RST_POWERON) {
+        count++;
+        nvs_set_u32(h, "unexp_rst", count);
+        nvs_commit(h);
+    }
+    nvs_close(h);
+    return count;
+}
+
 void app_main(void){   
+    // Why the board (re)started: POWERON is normal, CRASH = code panic,
+    // TASK/INT WDT = something hung, BROWNOUT = supply voltage dipped.
+    esp_reset_reason_t rr = esp_reset_reason();
+    ESP_LOGW("BOOT", "Reset reason: %s (%d)", reset_reason_name(rr), (int)rr);
+    uint32_t unexpected_restarts = count_unexpected_restart(rr);   // also starts NVS
+    g_theme = load_theme();
+    ui_set_theme(g_theme);               // before ui_init, so the first build uses it
+
     I2C_Init();
     EXIO_Init();
     LCD_Init();
     Touch_Init();
     LVGL_Init();
 
-    init_label_styles();
-
+    // LVGL isn't thread-safe: hold the lock while building the UI so the
+    // LVGL task can't render at the same time (that crashes at boot).
+    LVGL_Lock(-1);
     ui_init();
+    lv_timer_create(gauge_timer, 50, NULL);
+    // After an unexpected restart, show what it was at the bottom of the
+    // screen for 15 s, with how many unexpected restarts there have been.
+    if (rr != ESP_RST_POWERON) {
+        char msg[40];
+        snprintf(msg, sizeof(msg), "RESET: %s #%lu", reset_reason_name(rr), (unsigned long)unexpected_restarts);
+        ui_show_status(msg, 15000);
+    }
+    LVGL_Unlock();
 
     uart_init();
 
@@ -279,9 +287,7 @@ void app_main(void){
         NULL
     );
 
-    lv_timer_create(gauge_timer, 50, NULL);
 
-    
     Set_Backlight(0); 
     vTaskDelay(pdMS_TO_TICKS(750)); 
     Set_Backlight(100);
