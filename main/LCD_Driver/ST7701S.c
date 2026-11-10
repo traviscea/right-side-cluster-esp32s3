@@ -530,7 +530,7 @@ void Backlight_Init(void)
     ledc_channel_config(&ledc_channel);
     ledc_fade_func_install(0);
     
-    Set_Backlight(LCD_Backlight);      //0~100    
+    // Set_Backlight(LCD_Backlight);      //0~100   (main turns it on during the startup)
 }
 void Set_Backlight(uint8_t Light)
 {   

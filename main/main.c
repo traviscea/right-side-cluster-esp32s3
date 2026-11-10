@@ -26,7 +26,7 @@
 #define UART_BAUD      2000000
 
 #define SOF_BYTE       0xA5
-#define PKT_LEN        27   // SOF + seq + 23-byte payload + CRC16
+#define PKT_LEN        29   // SOF + seq + 25-byte payload + CRC16
 
 #define ENABLE_LOGS    false
 
@@ -44,9 +44,17 @@ typedef struct __attribute__((packed)) {
     uint32_t lap_time_ms;    
     uint32_t best_lap_ms;    // session best lap (0 = none yet)
     uint8_t  theme;          // face color theme from the center cluster
+    uint16_t startup_ms;     // how far into its startup the center is (stops at 65535)
 } gauge_payload_t;
 
+// The packet length must match the payload exactly (and match the center's).
+// This stops the build if they ever disagree.
+_Static_assert(sizeof(gauge_payload_t) == PKT_LEN - 4, "PKT_LEN must be payload + 4");
+
 static volatile uint8_t g_theme = 0;        // face color theme, from the center cluster
+static volatile bool g_startup_rx = false;      // got the center's startup clock
+static volatile uint16_t g_startup_ms = 0;
+static volatile int64_t g_startup_rx_us = 0;
 static volatile float g_afr = 14.7f;
 static volatile float g_boost = -0.0f;
 static volatile uint32_t g_lap_timer = 0;
@@ -97,10 +105,29 @@ static void uart_rx_task(void *arg){
     uint8_t buf[PKT_LEN];
     int idx = 0;
 
+    // Read in chunks: wait for one byte, then take everything already waiting.
+    // Byte-by-byte reads cost too much when the line carries noise or the
+    // center's boot messages (its console shares the TX pin while it boots):
+    // that used to starve the screen and delay the backlight until the center
+    // finished booting.
+    uint8_t chunk[128];
+    int have = 0, pos = 0;
+
     while (1) {
-        uint8_t byte;
-        if (uart_read_bytes(UART_PORT, &byte, 1, portMAX_DELAY) != 1)
-            continue;
+        if (pos >= have) {
+            pos = have = 0;
+            if (uart_read_bytes(UART_PORT, chunk, 1, portMAX_DELAY) != 1)
+                continue;
+            have = 1;
+            size_t waiting = 0;
+            uart_get_buffered_data_len(UART_PORT, &waiting);
+            if (waiting > sizeof(chunk) - 1) waiting = sizeof(chunk) - 1;
+            if (waiting > 0) {
+                int n = uart_read_bytes(UART_PORT, chunk + 1, waiting, 0);
+                if (n > 0) have += n;
+            }
+        }
+        uint8_t byte = chunk[pos++];
 
         // sync on SOF
         if (idx == 0 && byte != SOF_BYTE)
@@ -116,7 +143,9 @@ static void uart_rx_task(void *arg){
             uint16_t calc_crc = crc16_ccitt(&buf[1], PKT_LEN - 3);
 
             if (rx_crc != calc_crc) {
-                ESP_LOGW(TAG, "CRC fail");
+                // Noise or a partial packet: drop it quietly (logging every one
+                // floods the console when the line is noisy)
+                ESP_LOGD(TAG, "CRC fail");
                 continue;
             }
 
@@ -124,6 +153,11 @@ static void uart_rx_task(void *arg){
             memcpy(&p, &buf[2], sizeof(p));
 
             g_theme = p.theme;
+            if (!g_startup_rx) {                 // first packet: note where the center's startup is
+                g_startup_ms = p.startup_ms;
+                g_startup_rx_us = esp_timer_get_time();
+                g_startup_rx = true;
+            }
 
             float afr = p.afr * 0.1f;
             float boost = p.boost * 0.1f;
@@ -196,7 +230,19 @@ static void theme_update(void)
 }
 //--------------------------------------------------------------------------//
 
+// Line up this gauge's startup with the center's, using the first packet
+// (called on the LVGL thread)
+static void startup_sync(void)
+{
+    static bool done = false;
+    if (done || !g_startup_rx) return;
+    done = true;
+    int64_t since_rx_ms = (esp_timer_get_time() - g_startup_rx_us) / 1000;
+    ui_sweep_sync((uint32_t)g_startup_ms + (uint32_t)since_rx_ms);
+}
+
 void gauge_timer(lv_timer_t * t){
+    startup_sync();
     theme_update();
     ui_right_set_boost(g_boost);
     ui_right_set_afr(g_afr);
@@ -247,6 +293,12 @@ static uint32_t count_unexpected_restart(esp_reset_reason_t r)
     return count;
 }
 
+// Called by the startup sequence when it's time to light the screen
+static void side_backlight_on(void)
+{
+    Set_Backlight(100);
+}
+
 void app_main(void){   
     // Why the board (re)started: POWERON is normal, CRASH = code panic,
     // TASK/INT WDT = something hung, BROWNOUT = supply voltage dipped.
@@ -255,10 +307,12 @@ void app_main(void){
     uint32_t unexpected_restarts = count_unexpected_restart(rr);   // also starts NVS
     g_theme = load_theme();
     ui_set_theme(g_theme);               // before ui_init, so the first build uses it
+    ui_set_backlight_cb(side_backlight_on);
 
     I2C_Init();
     EXIO_Init();
     LCD_Init();
+    Set_Backlight(0);                    // dark until the startup turns it on (with the center)
     Touch_Init();
     LVGL_Init();
 
@@ -276,19 +330,20 @@ void app_main(void){
     }
     LVGL_Unlock();
 
+    // The backlight is turned on by the startup sequence (side_backlight_on),
+    // in step with the center cluster
+
     uart_init();
 
-    xTaskCreate(
+    // Core 0, away from the LVGL task on core 1, so incoming data can never
+    // stall the screen
+    xTaskCreatePinnedToCore(
         uart_rx_task,
         "uart_rx",
         4096,
         NULL,
         10,
-        NULL
+        NULL,
+        0
     );
-
-
-    Set_Backlight(0); 
-    vTaskDelay(pdMS_TO_TICKS(750)); 
-    Set_Backlight(100);
 }

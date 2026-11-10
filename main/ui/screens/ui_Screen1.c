@@ -320,12 +320,151 @@ static void set_text(lv_obj_t *label, const char *txt)
     if (strcmp(lv_label_get_text(label), txt) != 0) lv_label_set_text(label, txt);
 }
 
+// ---------------------------------------------------------------- face lighting
+// During the startup sweep only the needles are lit; the rest of the face is
+// dark and fades in once the sweep ends, like the stock cluster at key-on.
+
+static lv_opa_t face_opa = LV_OPA_COVER;
+
+static void face_set_opa(lv_opa_t o)
+{
+    face_opa = o;
+    if (!ui_Screen1) return;
+    uint32_t n = lv_obj_get_child_cnt(ui_Screen1);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *c = lv_obj_get_child(ui_Screen1, i);
+        if (c == boost_g.needle || c == boost_g.glow || c == afr_g.needle || c == afr_g.glow) continue;               // needles stay lit
+        if (c == lv_obj_get_parent(boost_hub_value) || c == lv_obj_get_parent(afr_hub_value)) {                          // hub caps aren't lit; their numbers are
+            uint32_t k = lv_obj_get_child_cnt(c);
+            for (uint32_t j = 0; j < k; j++) lv_obj_set_style_opa(lv_obj_get_child(c, j), o, 0);
+            continue;
+        }
+        lv_obj_set_style_opa(c, o, 0);
+    }
+}
+
+static void face_fade_cb(void *var, int32_t v)
+{
+    (void)var;
+    face_set_opa((lv_opa_t)v);
+}
+
+static void face_fade_in(void)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, ui_Screen1);
+    lv_anim_set_exec_cb(&a, face_fade_cb);
+    lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_time(&a, UI_SWEEP_FADE_MS);
+    lv_anim_start(&a);
+}
+
+// ---------------------------------------------------------------- backlight
+// The backlight comes on at a set point in the startup (UI_BACKLIGHT_ON_MS),
+// on the same timeline on all three screens, so they light up together.
+
+static void (*backlight_cb)(void) = NULL;
+static bool backlight_done = false;
+
+void ui_set_backlight_cb(void (*cb)(void)) { backlight_cb = cb; }
+
+static void backlight_on(void)
+{
+    if (backlight_done) return;
+    backlight_done = true;
+    if (backlight_cb) backlight_cb();
+}
+
+// ---------------------------------------------------------------- startup sweep
+// At boot both needles sweep to full scale and back down to the live values,
+// like the stock cluster at key-on. The smoothing keeps running underneath, so
+// the needles land on the real readings when the sweep ends.
+
+static lv_timer_t *sweep_timer = NULL;
+static uint32_t sweep_start = 0;
+static bool sweep_synced = false;             // on the center's timeline yet?
+
+static float sweep_ease(float x)              // smooth start and stop
+{
+    if (x <= 0) return 0;
+    if (x >= 1) return 1;
+    return x * x * (3 - 2 * x);
+}
+
+// Needle position at time t (ms into the sweep) on a 0..full scale, ending at
+// 'rest'. Returns false once the sweep is over.
+static bool sweep_pos(uint32_t t, float full, float rest, float *out)
+{
+    const uint32_t up = UI_SWEEP_UP_MS, hold = UI_SWEEP_HOLD_MS, down = UI_SWEEP_DOWN_MS;
+    if (t < up) { *out = full * sweep_ease((float)t / up); return true; }
+    if (t < up + hold) { *out = full; return true; }
+    if (t < up + hold + down) {
+        *out = full + (rest - full) * sweep_ease((float)(t - up - hold) / down);
+        return true;
+    }
+    return false;
+}
+
+static void needles_show(bool on)
+{
+    lv_obj_t *o[] = { boost_g.needle, boost_g.glow, afr_g.needle, afr_g.glow,
+                      lv_obj_get_parent(boost_hub_value), lv_obj_get_parent(afr_hub_value) };
+    for (unsigned i = 0; i < sizeof(o) / sizeof(o[0]); i++) {
+        if (on) lv_obj_clear_flag(o[i], LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(o[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void ui_sweep_sync(uint32_t center_ms)
+{
+    if (!sweep_timer) return;                 // startup already over (or turned off)
+    sweep_start = lv_tick_get() - center_ms;  // same timeline as the center
+    sweep_synced = true;
+}
+
+static void sweep_cb(lv_timer_t *t)
+{
+    (void)t;
+    uint32_t el = lv_tick_elaps(sweep_start);
+    if (!sweep_synced) {
+        // The center takes a few seconds to boot: stay dark and wait for its
+        // timing so all three sweep together. No center? Sweep on our own.
+        if (el < UI_SWEEP_WAIT_MS) return;
+        sweep_synced = true;
+        sweep_start = lv_tick_get() - UI_SWEEP_DELAY_MS;
+        el = UI_SWEEP_DELAY_MS;
+    }
+    if (el >= UI_BACKLIGHT_ON_MS) backlight_on();
+    if (el < UI_SWEEP_DELAY_MS) return;
+    el -= UI_SWEEP_DELAY_MS;
+    if (lv_obj_has_flag(boost_g.needle, LV_OBJ_FLAG_HIDDEN)) needles_show(true);   // needles and hubs appear
+
+    float b, a;
+    if (sweep_pos(el, 100, boost_g.seeded ? boost_g.shown : boost_pos(0), &b) &&
+        sweep_pos(el, 100, afr_g.seeded ? afr_g.shown : 0, &a)) {
+        needle_to(&boost_g, left_angle(b));
+        needle_to(&afr_g, right_angle(a));
+        return;
+    }
+
+    // Done: hand the needles back to the live values
+    lv_timer_del(sweep_timer);
+    sweep_timer = NULL;
+    boost_g.drawn_angle = afr_g.drawn_angle = -1000;
+    needle_to(&boost_g, left_angle(boost_g.seeded ? boost_g.shown : boost_pos(0)));
+    needle_to(&afr_g, right_angle(afr_g.seeded ? afr_g.shown : 0));
+    backlight_on();                           // (already on; just in case)
+    face_fade_in();
+}
+
 // Light smoothing so the needles stay responsive but don't buzz on noise
 static void step_gauge(gauge_t *g, float tau, float (*angle_of)(float))
 {
     if (!g->seeded) return;
     float dt = UI_NEEDLE_TICK_MS / 1000.0f;
     g->shown += (g->target - g->shown) * (dt / (tau + dt));
+    if (sweep_timer) return;                  // startup sweep owns the needles for now
     float a = angle_of(g->shown);
     if (fabsf(a - g->drawn_angle) >= 0.25f) { needle_to(g, a); g->drawn_angle = a; }
 }
@@ -357,6 +496,7 @@ void ui_show_status(const char *text, uint32_t duration_ms)
     if (!ui_Screen1) return;
     if (!status_label) {
         status_label = lv_label_create(ui_Screen1);
+        lv_obj_set_style_opa(status_label, face_opa, 0);   // lights up with the face
         lv_obj_set_style_text_font(status_label, &ui_font_status_20, 0);
         lv_obj_set_style_text_color(status_label, lv_color_hex(UI_COLOR_STATUS), 0);
         lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -421,6 +561,7 @@ static void install_static_dial(void)
     if (dial_obj) lv_obj_del(dial_obj);       // old live face (snapshot off/failed)
     dial_obj = dial;
     lv_obj_move_background(dial_obj);
+    if (face_opa != LV_OPA_COVER) lv_obj_set_style_opa(dial_obj, face_opa, 0);   // theme change mid-sweep
 }
 
 void ui_set_theme(uint8_t index)
@@ -459,6 +600,17 @@ void ui_Screen1_screen_init(void)
     needle_to(&boost_g, left_angle(boost_pos(0)));
     needle_to(&afr_g, right_angle(0));
     needle_timer = lv_timer_create(needle_timer_cb, UI_NEEDLE_TICK_MS, NULL);
+    backlight_done = false;
+#if !UI_SWEEP_ENABLE
+    backlight_on();                           // no startup sequence: light up now
+#endif
+#if UI_SWEEP_ENABLE
+    sweep_start = lv_tick_get();
+    sweep_synced = false;
+    sweep_timer = lv_timer_create(sweep_cb, 15, NULL);
+    face_set_opa(LV_OPA_TRANSP);              // blank face
+    needles_show(false);                      // needles and hubs come in at UI_SWEEP_DELAY_MS
+#endif
 
     last_boost_tenths = last_afr_tenths = -100000;
     last_lap = last_best = 0xFFFFFFFF;
@@ -471,6 +623,8 @@ void ui_Screen1_screen_destroy(void)
     status_label = NULL;
     if (needle_timer) lv_timer_del(needle_timer);
     needle_timer = NULL;
+    if (sweep_timer) lv_timer_del(sweep_timer);
+    sweep_timer = NULL;
     if (ui_Screen1) lv_obj_del(ui_Screen1);
 #if LV_USE_SNAPSHOT
     if (dial_snapshot) lv_snapshot_free(dial_snapshot);
