@@ -25,7 +25,9 @@
 #define EXAMPLE_LCD_V_RES              480
 #define EXAMPLE_LCD_H_RES              480
 
-#define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (18 * 1000 * 1000)
+// 16 MHz (~57 Hz refresh) leaves the bounce-buffer interrupt more PSRAM headroom
+// than 18 MHz. Put 18 back if the panel ever flickers.
+#define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (16 * 1000 * 1000)
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
 #define EXAMPLE_PIN_NUM_BK_LIGHT       6
