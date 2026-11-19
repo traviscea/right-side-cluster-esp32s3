@@ -16,3 +16,11 @@ CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ=240
 # Keep the RGB LCD interrupt in IRAM so it never stalls on PSRAM/flash
 CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
 CONFIG_GDMA_ISR_IRAM_SAFE=y
+
+# Save a crash report to flash so the cause of a reset can be shown on screen
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+# Keep the data-link UART interrupt in IRAM (no PSRAM/flash stalls)
+CONFIG_UART_ISR_IN_IRAM=y
+# Redraw the screen at most ~30 times a second (gauges look the same; half the memory load)
+CONFIG_LV_DISP_DEF_REFR_PERIOD=33

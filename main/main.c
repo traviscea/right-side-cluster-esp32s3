@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -11,9 +12,13 @@
 #include "ui/screens/ui_Screen1.h"
 #include "ui/ui.h"
 #include "driver/uart.h"
+#include "soc/uart_reg.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH       // crash reports (save to flash, show after a reset)
+#include "esp_core_dump.h"
+#endif
 #include "nvs_flash.h"
 #include "nvs.h"
 #include <string.h>
@@ -23,7 +28,9 @@
 
 #define UART_PORT      UART_NUM_1
 #define UART_RX_PIN    44
-#define UART_BAUD      2000000
+// Must match UART_BAUD_RATE on the center. 115200 is plenty for the packets
+// (~1.5 KB/s) and much less sensitive to electrical noise than 2 Mbaud.
+#define UART_BAUD      115200
 
 #define SOF_BYTE       0xA5
 #define PKT_LEN        29   // SOF + seq + 25-byte payload + CRC16
@@ -99,6 +106,13 @@ static void uart_init(void){
         NULL,
         0
     ));
+
+    // Noise on the data wire shows up as framing/parity errors and "break"
+    // (line held low). Nothing here uses those, and bad packets are already
+    // dropped by the CRC, so don't take an interrupt for each one: a burst of
+    // noise then can't flood the chip with interrupts. Normal receive and
+    // overflow handling stay on.
+    uart_disable_intr_mask(UART_PORT, UART_FRM_ERR_INT_ENA_M | UART_PARITY_ERR_INT_ENA_M | UART_BRK_DET_INT_ENA_M);
 }
 
 static void uart_rx_task(void *arg){
@@ -293,6 +307,43 @@ static uint32_t count_unexpected_restart(esp_reset_reason_t r)
     return count;
 }
 
+// After a crash or watchdog reset, read the crash report saved in flash and
+// add where it happened to the reset message: the task that was running, the
+// program counter (PC) and the first few backtrace addresses. Photograph it;
+// the addresses can be turned into file:line with
+//   xtensa-esp32s3-elf-addr2line -pfiaC -e build/<project>.elf <addresses>
+// The report is erased once shown, so the next one is fresh.
+static void add_crash_info(char *msg, size_t size)
+{
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH && CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
+    esp_core_dump_summary_t *s = calloc(1, sizeof(*s));
+    if (!s) return;
+    if (esp_core_dump_get_summary(s) == ESP_OK) {
+        // The status font has capitals, digits, ':' '#' and space only
+        char task[17];
+        size_t i = 0;
+        for (; i < sizeof(task) - 1 && s->exc_task[i]; i++) {
+            char c = s->exc_task[i];
+            if (c >= 'a' && c <= 'z') c -= 32;
+            if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) c = ' ';
+            task[i] = c;
+        }
+        task[i] = 0;
+        size_t len = strlen(msg);
+        len += snprintf(msg + len, size - len, "\nPC %08lX %s", (unsigned long)s->exc_pc, task);
+        uint32_t n = s->exc_bt_info.depth < 4 ? s->exc_bt_info.depth : 4;
+        for (uint32_t k = 0; k < n && len < size; k++) {
+            len += snprintf(msg + len, size - len, "%s%08lX", (k % 2 == 0) ? "\nBT " : " ",
+                            (unsigned long)s->exc_bt_info.bt[k]);
+        }
+    }
+    esp_core_dump_image_erase();
+    free(s);
+#else
+    (void)msg; (void)size;
+#endif
+}
+
 // Called by the startup sequence when it's time to light the screen
 static void side_backlight_on(void)
 {
@@ -313,7 +364,9 @@ void app_main(void){
     EXIO_Init();
     LCD_Init();
     Set_Backlight(0);                    // dark until the startup turns it on (with the center)
-    Touch_Init();
+    // Touch isn't used on the gauges. Leaving it off removes the touch chip's
+    // I2C polling (every LVGL refresh) and its interrupt pin from the picture.
+    // Touch_Init();
     LVGL_Init();
 
     // LVGL isn't thread-safe: hold the lock while building the UI so the
@@ -324,9 +377,14 @@ void app_main(void){
     // After an unexpected restart, show what it was at the bottom of the
     // screen for 15 s, with how many unexpected restarts there have been.
     if (rr != ESP_RST_POWERON) {
-        char msg[40];
+        char msg[128];
         snprintf(msg, sizeof(msg), "RESET: %s #%lu", reset_reason_name(rr), (unsigned long)unexpected_restarts);
-        ui_show_status(msg, 15000);
+        uint32_t show_ms = 15000;
+        if (rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT) {
+            add_crash_info(msg, sizeof(msg));
+            show_ms = 60000;             // long enough to take a photo
+        }
+        ui_show_status(msg, show_ms);
     }
     LVGL_Unlock();
 

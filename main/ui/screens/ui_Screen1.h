@@ -31,7 +31,9 @@ extern "C" {
 // edge off sensor noise; AFR flickers more, so it gets a little more.
 #define UI_BOOST_SMOOTH_S     0.06f
 #define UI_AFR_SMOOTH_S       0.25f
-#define UI_NEEDLE_TICK_MS       20
+#define UI_NEEDLE_TICK_MS       40   // needle updates (25/s: smooth, half the redraws of 20 ms)
+#define UI_NEEDLE_MIN_DEG     0.5f   // redraw a needle only once it has moved this far
+#define UI_TEXT_MIN_MS         150   // numbers update at most this often (~7/s; always the newest value)
 
 // ---------------- Startup (like the stock cluster at key-on) ----------------
 // Screen dark until the needles appear and sweep to full scale and back to the

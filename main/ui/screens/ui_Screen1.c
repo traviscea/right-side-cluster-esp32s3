@@ -51,7 +51,10 @@ static lv_img_dsc_t *dial_snapshot = NULL;
 static lv_obj_t *dial_obj = NULL;         // the face: snapshot image or live widgets
 static lv_timer_t *needle_timer = NULL;
 
-static int last_boost_tenths = -100000, last_afr_tenths = -100000;
+static int last_boost_tenths = -100000, last_afr_tenths = -100000;   // shown
+static int now_boost_tenths = -100000, now_afr_tenths = -100000;     // latest
+static bool now_boost_hot = false, now_afr_warn = false;
+static uint32_t last_text_ms = 0;
 static uint32_t last_lap = 0xFFFFFFFF, last_best = 0xFFFFFFFF;
 static float g_last_boost = 0;
 
@@ -466,12 +469,41 @@ static void step_gauge(gauge_t *g, float tau, float (*angle_of)(float))
     g->shown += (g->target - g->shown) * (dt / (tau + dt));
     if (sweep_timer) return;                  // startup sweep owns the needles for now
     float a = angle_of(g->shown);
-    if (fabsf(a - g->drawn_angle) >= 0.25f) { needle_to(g, a); g->drawn_angle = a; }
+    if (fabsf(a - g->drawn_angle) >= UI_NEEDLE_MIN_DEG) { needle_to(g, a); g->drawn_angle = a; }
+}
+
+// The numbers show the newest values, but redraw at most every UI_TEXT_MIN_MS:
+// boost and AFR flicker by a tenth all the time, and redrawing them 50 times a
+// second competes with the display refresh for memory.
+static void fmt_tenths(char *buf, size_t n, int tenths);
+
+static void show_numbers(void)
+{
+    if (lv_tick_elaps(last_text_ms) < UI_TEXT_MIN_MS) return;
+    last_text_ms = lv_tick_get();
+    char buf[12];
+    if (now_boost_tenths != -100000) {
+        if (now_boost_tenths != last_boost_tenths) {
+            last_boost_tenths = now_boost_tenths;
+            fmt_tenths(buf, sizeof(buf), now_boost_tenths);
+            set_text(boost_hub_value, buf);
+        }
+        set_color(boost_hub_value, now_boost_hot ? UI_COLOR_HOT : UI_COLOR_VALUE);
+    }
+    if (now_afr_tenths != -100000) {
+        if (now_afr_tenths != last_afr_tenths) {
+            last_afr_tenths = now_afr_tenths;
+            fmt_tenths(buf, sizeof(buf), now_afr_tenths);
+            set_text(afr_hub_value, buf);
+        }
+        set_color(afr_hub_value, now_afr_warn ? UI_COLOR_HOT : UI_COLOR_VALUE);
+    }
 }
 
 static void needle_timer_cb(lv_timer_t *t)
 {
     (void)t;
+    show_numbers();
     step_gauge(&boost_g, UI_BOOST_SMOOTH_S, left_angle);
     step_gauge(&afr_g, UI_AFR_SMOOTH_S, right_angle);
 }
@@ -502,7 +534,18 @@ void ui_show_status(const char *text, uint32_t duration_ms)
         lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
     }
     lv_label_set_text(status_label, text);
-    place(status_label, 0, 80);           // centered in the open space under the hubs
+    if (strchr(text, '\n')) {
+        // Several lines (crash details): on a dark panel in the middle
+        lv_obj_set_style_bg_color(status_label, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(status_label, LV_OPA_90, 0);
+        lv_obj_set_style_pad_all(status_label, 6, 0);
+        lv_obj_set_style_radius(status_label, 8, 0);
+        place(status_label, 0, 30);
+    } else {
+        lv_obj_set_style_bg_opa(status_label, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_pad_all(status_label, 0, 0);
+        place(status_label, 0, 80);       // centered in the open space under the hubs
+    }
 
     if (status_timer) lv_timer_del(status_timer);
     status_timer = lv_timer_create(status_hide_cb, duration_ms, NULL);
@@ -613,6 +656,7 @@ void ui_Screen1_screen_init(void)
 #endif
 
     last_boost_tenths = last_afr_tenths = -100000;
+    now_boost_tenths = now_afr_tenths = -100000;
     last_lap = last_best = 0xFFFFFFFF;
 }
 
@@ -655,13 +699,8 @@ void ui_right_set_boost(float psi)
     g_last_boost = psi;
     seed(&boost_g, boost_pos(psi));
 
-    int tenths = (int)lroundf(psi * 10);
-    if (tenths == last_boost_tenths) return;
-    last_boost_tenths = tenths;
-    char buf[12];
-    fmt_tenths(buf, sizeof(buf), tenths);
-    set_text(boost_hub_value, buf);
-    set_color(boost_hub_value, psi >= UI_BOOST_WARN_PSI ? UI_COLOR_HOT : UI_COLOR_VALUE);  // white, red when overboosting
+    now_boost_tenths = (int)lroundf(psi * 10);   // number: show_numbers()
+    now_boost_hot = psi >= UI_BOOST_WARN_PSI;    // white, red when overboosting
 }
 
 void ui_right_set_afr(float afr)
@@ -669,14 +708,8 @@ void ui_right_set_afr(float afr)
     if (!afr_g.needle) return;
     seed(&afr_g, afr_pos(afr));
 
-    bool warn = g_last_boost >= UI_AFR_CHECK_PSI && (afr < UI_AFR_RICH_WARN || afr > UI_AFR_LEAN_WARN);
-    set_color(afr_hub_value, warn ? UI_COLOR_HOT : UI_COLOR_VALUE);
-    int tenths = (int)lroundf(afr * 10);
-    if (tenths == last_afr_tenths) return;
-    last_afr_tenths = tenths;
-    char buf[12];
-    fmt_tenths(buf, sizeof(buf), tenths);
-    set_text(afr_hub_value, buf);
+    now_afr_warn = g_last_boost >= UI_AFR_CHECK_PSI && (afr < UI_AFR_RICH_WARN || afr > UI_AFR_LEAN_WARN);
+    now_afr_tenths = (int)lroundf(afr * 10);     // number: show_numbers()
 }
 
 static void fmt_lap(char *buf, size_t n, uint32_t ms)
